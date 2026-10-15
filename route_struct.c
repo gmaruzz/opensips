@@ -45,7 +45,10 @@
 #include "dprint.h"
 #include "ip_addr.h"
 #include "mem/mem.h"
+#include "mem/shm_mem.h"
 #include "ut.h" /* ZSW() */
+#include "transformations.h"
+#include "xlog.h"
 
 struct expr* mk_exp(int op, struct expr* left, struct expr* right)
 {
@@ -204,6 +207,25 @@ void free_action_list( struct action *a)
 		/* unref the resume route */
 		unref_script_route
 			( (struct script_route_ref*)(a->elem[1].u.data) );
+
+	if (a->type==XLOG_T || a->type==XDBG_T) {
+		/* two-argument xlog(): elem[0] holds the log level
+		 * (xl_level_t), allocated at fixup time and left as STR_ST,
+		 * so free_action_elem() does not release it -- free it here */
+		if (a->elem[0].type==STR_ST && a->elem[0].u.data) {
+			xl_level_p xlp = (xl_level_p)a->elem[0].u.data;
+			if (xlp->type==1) {
+				if (xlp->v.sp.trans)
+					free_transformation((trans_t*)xlp->v.sp.trans);
+				if ((xlp->v.sp.pvp.pvv_flags & PV_PARAM_PVV_SHM) &&
+						xlp->v.sp.pvp.pvv.s)
+					shm_free(xlp->v.sp.pvp.pvv.s);
+			}
+			pkg_free(xlp);
+			a->elem[0].u.data = NULL;
+			a->elem[0].type = 0;
+		}
+	}
 
 	for( i=0 ; i<MAX_ACTION_ELEMS ; i++) {
 		if (a->elem[i].type)
