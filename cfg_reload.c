@@ -103,6 +103,7 @@ void reload_free_old_cfg(void)
 {
 	LM_ERR("finally removing the old/prev cfg\n");
 	free_route_lists(prev_sr);
+	pkg_free(prev_sr);
 	prev_sr = NULL;
 	_have_old_script = 0;
 }
@@ -341,6 +342,7 @@ static void routes_switch_per_proc(int sender, void *param)
 		/* we can get rid of the script right away*/
 		LM_DBG("no ongoing async, freeing the previous cfg\n");
 		free_route_lists(sroutes);
+		pkg_free(sroutes);
 		prev_sr = NULL;
 		_have_old_script = 0;
 	}
