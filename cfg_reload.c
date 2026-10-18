@@ -35,6 +35,7 @@
 
 extern FILE *yyin;
 extern int yyparse();
+extern int yyrestart(FILE*);
 #ifdef DEBUG_PARSER
 extern int yydebug;
 #endif
@@ -56,6 +57,10 @@ struct script_reload_ctx {
 	rw_lock_t *rw_lock;
 	unsigned int seq_no;
 	unsigned int next_seq_no;
+	/* generation of the cfg text currently installed via reload; bumped
+	   only when a reload carries a text different from the installed one,
+	   so repeated reloads of an unchanged cfg are detected as no-ops */
+	unsigned long long cfg_generation;
 	str reloaded_cfg_buf;
 	str cfg_buf;
 	enum proc_reload_status *proc_status;
@@ -84,6 +89,17 @@ static struct os_script_routes *prev_sr=NULL;
 
 static struct os_script_routes *swap_bk = NULL;
 
+/* per process: generation of the cfg text this process last installed in
+   'sroutes'; a reload cmd carrying the same generation needs no re-parse
+   (the installed script is already exactly that text) */
+static unsigned long long my_parsed_gen = 0;
+
+/* per process: the pre-fork startup routes holder; it is the very first
+   pkg allocation of the process, so its fragment is the pool's first one
+   (pf==NULL) and fm_free()'s sanity check rightfully aborts when freeing
+   it -- the startup holder must never be pkg_free()'d on the reload path */
+static struct os_script_routes *startup_sr = NULL;
+
 
 
 void reload_swap_old_script(void)
@@ -103,6 +119,8 @@ void reload_free_old_cfg(void)
 {
 	LM_ERR("finally removing the old/prev cfg\n");
 	free_route_lists(prev_sr);
+	if (prev_sr!=startup_sr)
+		pkg_free(prev_sr);
 	prev_sr = NULL;
 	_have_old_script = 0;
 }
@@ -250,6 +268,17 @@ static void routes_reload_per_proc(int sender, void *param)
 
 	srr_ctx->proc_status[process_no] = RELOAD_RECEIVED;
 
+	/* no need to re-parse (and re-leak the parse allocations) if this
+	   process already runs exactly this generation of the cfg text */
+	if (srr_ctx->cfg_generation!=0 &&
+	srr_ctx->cfg_generation==my_parsed_gen) {
+		LM_INFO("process already runs this cfg text (gen %llu),"
+			" skipping re-parse\n", srr_ctx->cfg_generation);
+		srr_ctx->proc_status[process_no] = RELOAD_SUCCESS;
+		lock_stop_read(srr_ctx->rw_lock);
+		return;
+	}
+
 	/* get a file stream from the buffer */
 	cfg = fmemopen( srr_ctx->cfg_buf.s, srr_ctx->cfg_buf.len, "r");
 	if (!cfg) {
@@ -321,10 +350,24 @@ static void routes_switch_per_proc(int sender, void *param)
 
 	if (srr_ctx->seq_no!=0 && srr_ctx->seq_no!=seq_no) {
 		LM_INFO("dropping switch cmd due out of sequence reason\n");
-		if (parsed_sr) free_route_lists(parsed_sr);
+		if (parsed_sr) {
+			free_route_lists(parsed_sr);
+			pkg_free(parsed_sr);
+		}
 		parsed_sr = NULL;
 		return;
 	}
+
+	if (parsed_sr==NULL) {
+		/* the re-parse was skipped (unchanged cfg text): the current
+		   script is already the right one, nothing to swap or free */
+		LM_DBG("no new script parsed (unchanged cfg text),"
+			" keeping current routes\n");
+		return;
+	}
+
+	if (startup_sr==NULL)
+		startup_sr = sroutes;
 
 	/* handle the async fd - mark them and see if we have any; if yes, 
 	 * then we need to keep the previous cfg until all the async are done */
@@ -341,6 +384,8 @@ static void routes_switch_per_proc(int sender, void *param)
 		/* we can get rid of the script right away*/
 		LM_DBG("no ongoing async, freeing the previous cfg\n");
 		free_route_lists(sroutes);
+		if (sroutes!=startup_sr)
+			pkg_free(sroutes);
 		prev_sr = NULL;
 		_have_old_script = 0;
 	}
@@ -348,6 +393,7 @@ static void routes_switch_per_proc(int sender, void *param)
 	/* swap the old route set with the new parsed set */
 	sroutes = parsed_sr;
 	parsed_sr = NULL;
+	my_parsed_gen = srr_ctx->cfg_generation;
 
 	/* update all the ref to script routes */
 	update_all_script_route_refs();
@@ -443,9 +489,10 @@ int reload_routing_script(void)
 		}
 	}
 
-	ret = parse_opensips_cfg( cfg_file, preproc, &cfg_buf);
-
-	cfg_parse_only_routes = 0;
+	/* OT (#601): load the cfg TEXT first, without parsing it, so an
+	   unchanged cfg can be detected before paying a full re-parse (which
+	   leaks pkg memory in this MI process) */
+	ret = load_opensips_cfg_text( cfg_file, preproc, &cfg_buf);
 
 	/* revert to the original working dir */
 	if (curr_wdir) {
@@ -457,9 +504,53 @@ int reload_routing_script(void)
 	}
 
 	if (ret<0) {
-		LM_ERR("parsing failed, abording\n");
+		LM_ERR("failed to load the cfg text, abording\n");
 		goto error;
 	}
+
+	/* no-op if the running script text is unchanged (the text installed
+	   by the last reload lives in reloaded_cfg_buf between reloads) */
+	if (srr_ctx->reloaded_cfg_buf.s &&
+	srr_ctx->reloaded_cfg_buf.len==cfg_buf.len &&
+	memcmp(srr_ctx->reloaded_cfg_buf.s, cfg_buf.s, cfg_buf.len)==0) {
+		LM_INFO("cfg text unchanged since the last reload, nothing to do\n");
+		sroutes = sr_bk;
+		/* sr is still empty (the parse never ran) */
+		pkg_free(sr);
+		free(cfg_buf.s);
+		cfg_buf.s = NULL;
+		cfg_buf.len = 0;
+		/* release the reload (seq_no) like reset_script_reload_ctx() does,
+		   but do NOT touch reloaded_cfg_buf: it holds the installed text
+		   this very gate compares against */
+		memset( srr_ctx->proc_status, 0,
+			counted_max_processes*sizeof(enum proc_reload_status));
+		lock_get( &srr_ctx->lock );
+		srr_ctx->seq_no = 0;
+		lock_release( &srr_ctx->lock );
+		return 0;
+	}
+
+	/* parse, but only the routes */
+	cfg_parse_only_routes = 1;
+
+	yyin = fmemopen( cfg_buf.s, cfg_buf.len, "r");
+	if (!yyin) {
+		LM_ERR("failed to open the cfg buffer for parsing\n");
+		cfg_parse_only_routes = 0;
+		goto error;
+	}
+	yyrestart(yyin);
+	cfg_errors = 0;
+	if (yyparse() != 0 || cfg_errors) {
+		LM_ERR("bad config file (%d errors)\n", cfg_errors);
+		fclose(yyin);
+		cfg_parse_only_routes = 0;
+		goto error;
+	}
+	fclose(yyin);
+
+	cfg_parse_only_routes = 0;
 
 	LM_INFO("fixing the loaded routes\n");
 
@@ -494,6 +585,10 @@ int reload_routing_script(void)
 	free( cfg_buf.s );
 	cfg_buf.s = NULL;
 	cfg_buf.len = 0;
+
+	/* the installed text changed, bump its generation; processes compare
+	   against it to skip the re-parse of an unchanged cfg (#601) */
+	srr_ctx->cfg_generation++;
 
 	/* send the script for parse and validation to all procs */
 	send_cmd_to_all_procs( routes_reload_per_proc );
