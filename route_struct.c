@@ -259,6 +259,26 @@ void free_action_list_ex( struct action *a, int deep)
 		}
 	}
 
+	if (deep && a->type==ROUTE_T && a->elem[2].type==SCRIPTVAR_ST) {
+		/* route(name, params...): the grammar (cfg.y) stores the call
+		   parameters in a separately pkg_malloc()'ed action_elem_t[]
+		   (elem[1] = NUMBER_ST with the params count, elem[2] =
+		   SCRIPTVAR_ST pointing at the array -- the type lies, it is
+		   NOT a pv_spec, so the generic walk below must not treat it
+		   as one). Its SCRIPTVAR_ST entries are pv specs to release;
+		   strings are lexer-arena owned, numbers and NULLs own nothing */
+		int nparams = (int)(long)a->elem[1].u.number;
+		action_elem_t *params = (action_elem_t*)a->elem[2].u.data;
+		if (params) {
+			for( i=0 ; i<nparams && i<MAX_ACTION_ELEMS ; i++ )
+				if (params[i].type==SCRIPTVAR_ST)
+					pv_spec_free( (pv_spec_p)params[i].u.data );
+			pkg_free(params);
+			a->elem[2].u.data = NULL;
+			a->elem[2].type = 0;
+		}
+	}
+
 	if (deep && (a->type==CMD_T || a->type==AMODULE_T)) {
 		/* fixed command actions hold one gparam per parameter in
 		   elems[1..]; free them (and the tree-owned objects they point
