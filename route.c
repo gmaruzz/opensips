@@ -163,6 +163,51 @@ void free_route_lists(struct os_script_routes *sr)
 
 }
 
+/* OT (#601): deep variant of free_route_lists() for the route trees
+ * dropped by a routes reload -- such a tree is always fully fix()'ed, so
+ * free_action_list_ex() in deep mode also releases the pv specs, the
+ * compiled match regexes, the per-command gparams and the xlog level
+ * structs (the lexer strings themselves are owned by the per-generation
+ * arena in cfg.lex and freed with the generation). */
+void free_route_lists_deep(struct os_script_routes *sr)
+{
+	int i;
+
+	for( i=0 ; i<RT_NO ; i++ )
+		if (sr->request[i].a)
+			free_action_list_ex(sr->request[i].a, 1);
+
+	for( i=0 ; i<ONREPLY_RT_NO ; i++ )
+		if (sr->onreply[i].a)
+			free_action_list_ex(sr->onreply[i].a, 1);
+
+	for( i=0 ; i<FAILURE_RT_NO ; i++ )
+		if (sr->failure[i].a)
+			free_action_list_ex(sr->failure[i].a, 1);
+
+	for( i=0 ; i<BRANCH_RT_NO ; i++ )
+		if (sr->branch[i].a)
+			free_action_list_ex(sr->branch[i].a, 1);
+
+	if (sr->local.a)
+		free_action_list_ex(sr->local.a, 1);
+
+	if (sr->error.a)
+		free_action_list_ex(sr->error.a, 1);
+
+	if (sr->startup.a)
+		free_action_list_ex(sr->startup.a, 1);
+
+	for( i=0 ; i<TIMER_RT_NO ; i++ )
+		if (sr->timer[i].a)
+			free_action_list_ex(sr->timer[i].a, 1);
+
+	for( i=0 ; i<EVENT_RT_NO ; i++ )
+		if (sr->event[i].a)
+			free_action_list_ex(sr->event[i].a, 1);
+
+}
+
 
 /************************** Generic functions ***********************/
 
@@ -1264,8 +1309,9 @@ static int fix_expr(struct expr* exp)
 						pkg_free(re);
 						return E_BAD_RE;
 					}
-					/* replace the string with the re */
-					pkg_free(exp->right.v.data);
+					/* replace the string with the re; the string stays
+					   owned by the lexer-string arena (cfg.lex) and is
+					   freed with its generation (OT #601) */
 					exp->right.v.data=re;
 					exp->right.type=RE_ST;
 				}else if (exp->right.type!=RE_ST

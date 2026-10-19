@@ -100,6 +100,14 @@ static unsigned long long my_parsed_gen = 0;
    it -- the startup holder must never be pkg_free()'d on the reload path */
 static struct os_script_routes *startup_sr = NULL;
 
+/* OT (#601): per-generation lexer-string arena, implemented in cfg.lex:
+   each cfg (re)parse's strings are tracked in their own generation and
+   freed wholesale when the route tree that owns them is dropped */
+void cfg_lex_gen_push(void);
+void cfg_lex_gen_pop(void);
+void cfg_lex_gen_free_prev(void);
+void cfg_lex_gen_abandon(void);
+
 
 
 void reload_swap_old_script(void)
@@ -118,11 +126,13 @@ void reload_swap_current_script(void)
 void reload_free_old_cfg(void)
 {
 	LM_ERR("finally removing the old/prev cfg\n");
-	free_route_lists(prev_sr);
+	free_route_lists_deep(prev_sr);
 	if (prev_sr!=startup_sr)
 		pkg_free(prev_sr);
 	prev_sr = NULL;
 	_have_old_script = 0;
+	/* the dropped tree's lexer strings die with it */
+	cfg_lex_gen_free_prev();
 }
 
 
@@ -246,6 +256,7 @@ static void routes_reload_per_proc(int sender, void *param)
 {
 	struct os_script_routes *sr_bk;
 	int seq_no = (int)(long)param;
+	int gen_pushed = 0, parse_ok = 0;
 	FILE *cfg;
 
 	LM_DBG("reload cmd received in process %d, with seq no %d\n",
@@ -289,7 +300,7 @@ static void routes_reload_per_proc(int sender, void *param)
 	/* get and set a new script routes holder (for new cfg) */
 	if (parsed_sr) {
 		/* probabaly left by mistake from a prev attempt ?? */
-		free_route_lists(parsed_sr);
+		free_route_lists_deep(parsed_sr);
 		pkg_free(parsed_sr);
 	}
 	parsed_sr = new_sroutes_holder( 1 );
@@ -298,6 +309,10 @@ static void routes_reload_per_proc(int sender, void *param)
 		fclose(cfg);
 		goto error;
 	}
+	/* the strings of this parse belong to their own generation, so they
+	   can be freed when the tree they end up in is later dropped */
+	cfg_lex_gen_push();
+	gen_pushed = 1;
 	sr_bk = sroutes;
 	sroutes = parsed_sr;
 
@@ -309,6 +324,7 @@ static void routes_reload_per_proc(int sender, void *param)
 		fclose(cfg);
 		goto error;
 	}
+	parse_ok = 1;
 	fclose(cfg);
 	cfg_parse_only_routes = 0;
 
@@ -331,6 +347,15 @@ static void routes_reload_per_proc(int sender, void *param)
 error:
 	srr_ctx->proc_status[process_no] = RELOAD_FAILED;
 	lock_stop_read(srr_ctx->rw_lock);
+	if (gen_pushed) {
+		/* a successful parse never individually frees lexer strings, so
+		   its generation can be freed wholesale; a failed parse may have
+		   (cfg error paths), so its generation is abandoned, not freed */
+		if (parse_ok)
+			cfg_lex_gen_pop();
+		else
+			cfg_lex_gen_abandon();
+	}
 	if (parsed_sr) {
 		free_route_lists(parsed_sr);
 		pkg_free(parsed_sr);
@@ -351,10 +376,13 @@ static void routes_switch_per_proc(int sender, void *param)
 	if (srr_ctx->seq_no!=0 && srr_ctx->seq_no!=seq_no) {
 		LM_INFO("dropping switch cmd due out of sequence reason\n");
 		if (parsed_sr) {
-			free_route_lists(parsed_sr);
+			free_route_lists_deep(parsed_sr);
 			pkg_free(parsed_sr);
 		}
 		parsed_sr = NULL;
+		/* the parsed-but-never-installed tree's strings: its generation
+		   stays in the arena and is freed as "previous" by the next
+		   successful switch (or with the tree, via abandon on failure) */
 		return;
 	}
 
@@ -383,11 +411,15 @@ static void routes_switch_per_proc(int sender, void *param)
 	} else {
 		/* we can get rid of the script right away*/
 		LM_DBG("no ongoing async, freeing the previous cfg\n");
-		free_route_lists(sroutes);
+		free_route_lists_deep(sroutes);
 		if (sroutes!=startup_sr)
 			pkg_free(sroutes);
 		prev_sr = NULL;
 		_have_old_script = 0;
+		/* the dropped tree's lexer strings die with it; when the dropped
+		   tree IS the startup tree, free_prev() keeps its immortal
+		   generation alive */
+		cfg_lex_gen_free_prev();
 	}
 
 	/* swap the old route set with the new parsed set */
@@ -450,6 +482,7 @@ int reload_routing_script(void)
 	char * curr_wdir=NULL;
 	str cfg_buf={NULL,0};
 	int cnt_sleep, ret;
+	int gen_pushed = 0, parse_ok = 0;
 
 	/* one reload at a time */
 	lock_get( &srr_ctx->lock );
@@ -542,12 +575,17 @@ int reload_routing_script(void)
 	}
 	yyrestart(yyin);
 	cfg_errors = 0;
+	/* the scratch tree's strings get their own generation: the tree is
+	   validated here and discarded, never installed */
+	cfg_lex_gen_push();
+	gen_pushed = 1;
 	if (yyparse() != 0 || cfg_errors) {
 		LM_ERR("bad config file (%d errors)\n", cfg_errors);
 		fclose(yyin);
 		cfg_parse_only_routes = 0;
 		goto error;
 	}
+	parse_ok = 1;
 	fclose(yyin);
 
 	cfg_parse_only_routes = 0;
@@ -569,9 +607,15 @@ int reload_routing_script(void)
 
 	/* we do not need the cfg, so free it and restore previous set of routes */
 	sroutes = sr_bk;
-	free_route_lists(sr);
+	free_route_lists_deep(sr);
 	pkg_free(sr);
 	sr = NULL;
+	/* the scratch tree (and its strings) was validated and discarded,
+	   never installed */
+	if (gen_pushed) {
+		cfg_lex_gen_pop();
+		gen_pushed = 0;
+	}
 
 	LM_DBG("new routes are valid and approved, push it to all procs\n");
 
@@ -641,9 +685,18 @@ error:
 	/* do cleanup */
 	if (curr_wdir) free(curr_wdir);
 	if (sr) {
+		/* on the error path the tree may be only partially fixed, so it
+		   is freed stock-shallow; its strings go with its generation
+		   (freed wholesale if the parse went clean, abandoned if not) */
 		free_route_lists(sr);
 		pkg_free(sr);
 		sroutes = sr_bk;
+	}
+	if (gen_pushed) {
+		if (parse_ok)
+			cfg_lex_gen_pop();
+		else
+			cfg_lex_gen_abandon();
 	}
 	if (cfg_buf.s)
 		free(cfg_buf.s);

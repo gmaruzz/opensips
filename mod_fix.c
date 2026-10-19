@@ -535,6 +535,62 @@ int free_cmd_fixups(const struct cmd_param *params, action_elem_t *elems, void *
 	return 0;
 }
 
+/* OT (#601): free what the route tree owns in a fixed command action:
+   the gparam shells and the tree-lifetime objects they point to.  This
+   mirrors free_cmd_fixups()'s per-type semantics, but releases the
+   tree-owned objects (a pv spec, a pv elem model, a per-tree fixup
+   handle, the fix-time compiled regex) instead of per-message runtime
+   handles.  Like free_cmd_fixups(), CMD_PARAM_VAR frees nothing (the
+   runtime leaves those alone too). */
+void free_cmd_gparams(const struct cmd_param *params, action_elem_t *elems)
+{
+	int i;
+	const struct cmd_param *param;
+	gparam_p gp;
+
+	for (param=params, i=1; param->flags; param++, i++) {
+		gp = (gparam_p)elems[i].u.data;
+		if (!gp)
+			continue;
+
+		if (param->flags & CMD_PARAM_INT) {
+			if (gp->type == GPARAM_TYPE_PVS)
+				pv_spec_free( (pv_spec_p)gp->pval );
+			/* GPARAM_TYPE_FIXUP handles are freed below */
+		} else if (param->flags & CMD_PARAM_STR) {
+			if (gp->type == GPARAM_TYPE_PVS)
+				pv_spec_free( (pv_spec_p)gp->pval );
+			else if (gp->type == GPARAM_TYPE_PVE)
+				pv_elem_free_all( (pv_elem_t*)gp->pval );
+		} else if (param->flags & CMD_PARAM_REGEX) {
+			if (gp->type == GPARAM_TYPE_PVS) {
+				pv_spec_free( (pv_spec_p)gp->pval );
+			} else if (gp->type == GPARAM_TYPE_PVE) {
+				pv_elem_free_all( (pv_elem_t*)gp->pval );
+			} else if (gp->type == GPARAM_TYPE_VAL && gp->pval) {
+				if (param->free_fixup) {
+					void *p = gp->pval;
+					param->free_fixup(&p);
+				} else {
+					regfree( (regex_t*)gp->pval );
+					pkg_free( gp->pval );
+				}
+			}
+		} else if (param->flags & CMD_PARAM_VAR) {
+			/* nothing, as in free_cmd_fixups() */
+		} else {
+			LM_BUG("Bad command parameter type\n");
+		}
+
+		if (gp->type == GPARAM_TYPE_FIXUP && param->free_fixup) {
+			void *p = gp->pval;
+			param->free_fixup(&p);
+		}
+
+		pkg_free(gp);
+	}
+}
+
 int fixup_named_flags(void** param, str *flag_names, str *kv_flag_names,
 	str *kv_flag_vals)
 {

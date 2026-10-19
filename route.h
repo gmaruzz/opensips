@@ -193,6 +193,7 @@ void get_route_name(int idx, str *name);
 struct os_script_routes* new_sroutes_holder( int inc_ver );
 
 void free_route_lists(struct os_script_routes *sr);
+void free_route_lists_deep(struct os_script_routes *sr);
 
 
 int run_startup_route(void);

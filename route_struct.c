@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <regex.h>
 
 #include "sr_module.h"
 #include "dprint.h"
@@ -142,7 +143,19 @@ struct action* append_action(struct action* a, struct action* b)
 }
 
 
-static void free_expr( struct expr *e)
+/* OT (#601): deep tree free, see free_route_lists_deep().
+ *
+ * In "deep" mode the walk also releases what only exists in a fully
+ * fix()'ed tree, so it may run ONLY on such trees (the route trees
+ * dropped by a routes reload are always fully fixed):
+ *  - the pv specs held by SCRIPTVAR elems/expr operands (pv_spec_free,
+ *    vs a plain pkg_free of the shell in stock mode)
+ *  - the regexes compiled by fix_expr() for =~ / !~ (RE_ST)
+ *  - the per-command gparams of CMD_T / AMODULE_T actions (with their
+ *    pv spec / pv elem model / fixup handle)
+ *  - the xlog level struct (fixed xlog actions only)
+ */
+static void free_expr_r( struct expr *e, int deep)
 {
 	if (e==NULL)
 		return;
@@ -152,30 +165,44 @@ static void free_expr( struct expr *e)
 		/* left ... */
 		switch (e->left.type) {
 			case EXPR_O:
-				free_expr( e->left.v.expr ); break;
+				free_expr_r( e->left.v.expr, deep ); break;
 			case ACTION_O:
-				free_action_list( (struct action*)e->left.v.data ); break;
+				free_action_list_ex( (struct action*)e->left.v.data, deep ); break;
 			case SCRIPTVAR_O:
-				pkg_free( e->left.v.data ); break;
+				if (deep)
+					pv_spec_free( (pv_spec_p)e->left.v.data );
+				else
+					pkg_free( e->left.v.data );
+				break;
 		}
 		/* ... and right */
 		switch (e->right.type) {
 			case EXPR_ST:
-				free_expr( e->right.v.expr ); break;
+				free_expr_r( e->right.v.expr, deep ); break;
 			case ACTIONS_ST:
-				free_action_list( (struct action*)e->right.v.data ); break;
+				free_action_list_ex( (struct action*)e->right.v.data, deep ); break;
 			case SCRIPTVAR_ST:
-				pkg_free( e->right.v.data ); break;
+				if (deep)
+					pv_spec_free( (pv_spec_p)e->right.v.data );
+				else
+					pkg_free( e->right.v.data );
+				break;
+			case RE_ST:
+				if (deep && e->right.v.data) {
+					regfree( (regex_t*)e->right.v.data );
+					pkg_free( e->right.v.data );
+				}
+				break;
 		}
 
 	} else if (e->type==EXP_T) {
 
 		/* left ... */
 		if (e->left.v.expr)
-			free_expr( e->left.v.expr );
+			free_expr_r( e->left.v.expr, deep );
 		/* ... and right */
 		if (e->right.v.expr)
-			free_expr( e->right.v.expr );
+			free_expr_r( e->right.v.expr, deep );
 
 	}
 
@@ -183,20 +210,24 @@ static void free_expr( struct expr *e)
 }
 
 
-static void free_action_elem( action_elem_t *e )
+static void free_action_elem_r( action_elem_t *e, int deep)
 {
 	if (e->type==EXPR_ST)
-		free_expr( (struct expr*)e->u.data );
+		free_expr_r( (struct expr*)e->u.data, deep );
 	else if (e->type==ACTIONS_ST)
-		free_action_list( (struct action*)e->u.data );
-	else if (e->type==SCRIPTVAR_ST)
-		pkg_free(e->u.data);
+		free_action_list_ex( (struct action*)e->u.data, deep );
+	else if (e->type==SCRIPTVAR_ST) {
+		if (deep)
+			pv_spec_free( (pv_spec_p)e->u.data );
+		else
+			pkg_free(e->u.data);
+	}
 	else if (e->type==SCRIPTVAR_ELEM_ST)
 		pv_elem_free_all(e->u.data);
 }
 
 
-void free_action_list( struct action *a)
+void free_action_list_ex( struct action *a, int deep)
 {
 	int i;
 
@@ -208,7 +239,7 @@ void free_action_list( struct action *a)
 		unref_script_route
 			( (struct script_route_ref*)(a->elem[1].u.data) );
 
-	if (a->type==XLOG_T || a->type==XDBG_T) {
+	if (deep && (a->type==XLOG_T || a->type==XDBG_T)) {
 		/* two-argument xlog(): elem[0] holds the log level
 		 * (xl_level_t), allocated at fixup time and left as STR_ST,
 		 * so free_action_elem() does not release it -- free it here */
@@ -227,15 +258,34 @@ void free_action_list( struct action *a)
 		}
 	}
 
-	for( i=0 ; i<MAX_ACTION_ELEMS ; i++) {
-		if (a->elem[i].type)
-			free_action_elem( &a->elem[i] );
+	if (deep && (a->type==CMD_T || a->type==AMODULE_T)) {
+		/* fixed command actions hold one gparam per parameter in
+		   elems[1..]; free them (and the tree-owned objects they point
+		   to) here -- the generic elem walk below must not touch them */
+		if (a->type==CMD_T)
+			free_cmd_gparams(
+				((const cmd_export_t*)a->elem[0].u.data_const)->params,
+				a->elem);
+		else
+			free_cmd_gparams(
+				((const acmd_export_t*)a->elem[0].u.data_const)->params,
+				a->elem);
+	} else {
+		for( i=0 ; i<MAX_ACTION_ELEMS ; i++) {
+			if (a->elem[i].type)
+				free_action_elem_r( &a->elem[i], deep );
+		}
 	}
 
 	if (a->next)
-		free_action_list(a->next);
+		free_action_list_ex(a->next, deep);
 
 	pkg_free(a);
+}
+
+void free_action_list( struct action *a)
+{
+	free_action_list_ex( a, 0);
 }
 
 

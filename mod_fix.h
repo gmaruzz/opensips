@@ -51,6 +51,13 @@ int get_cmd_fixups(struct sip_msg* msg, const struct cmd_param *params,
 				action_elem_t *elems, void **cmdp, pv_value_t *tmp_val);
 int free_cmd_fixups(const struct cmd_param *params, action_elem_t *elems, void **cmdp);
 
+/* OT (#601): tree-drop counterpart of free_cmd_fixups() -- frees what is
+   owned by the route tree itself (the gparam shells, their pv specs, pv
+   elem models and per-tree fixup handles).  Unlike free_cmd_fixups(),
+   which releases per-message runtime handles, this runs once, when a
+   routes reload drops the tree that owns the gparams. */
+void free_cmd_gparams(const struct cmd_param *params, action_elem_t *elems);
+
 /**
  * Parses CSV named flags and sets the bitmasks / returns
  * the string values for key-value type of flags ("flag_name=flag_value").

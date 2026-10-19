@@ -139,6 +139,11 @@ struct action* mk_action(int type, int n, action_elem_t *elem,
 		int line, char *file);
 struct action* append_action(struct action* a, struct action* b);
 void free_action_list( struct action *a);
+void free_action_list_ex( struct action *a, int deep);
+/* OT (#601): free the per-parameter gparams (with their pv spec / pv
+   elem model / fixup handle) of a fully fixed CMD_T/AMODULE_T action;
+   implemented in mod_fix.c */
+void free_cmd_gparams(const struct cmd_param *params, action_elem_t *elems);
 
 
 void print_action(struct action* a);

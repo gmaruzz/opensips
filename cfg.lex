@@ -82,6 +82,157 @@
 	static int state=0;
 	static str st;
 	static struct str_buf s_buf;
+
+	/* OT (#601): per-generation lexer-string arena.
+	 *
+	 * Every buffer addstr() produces during a cfg parse is handed to the
+	 * grammar (yylval.strval) and ends up owned by the parsed route tree
+	 * (route names, string tokens, case labels).  When a routes reload
+	 * drops the previous generation, stock OpenSIPS frees the tree nodes
+	 * but never these strings -- they were 84.6% of the pkg memory leaked
+	 * per reload per process.  Instead of hunting each owner, the buffers
+	 * are recorded in a per-generation arena and freed wholesale when the
+	 * generation is dropped.
+	 *
+	 * Each buffer stays a plain pkg_malloc() base pointer, so the stray
+	 * pkg_free()s of single strings on cfg syntax-error paths (cfg.y error
+	 * rules, fixup-time regex replacement) remain valid individual frees;
+	 * a generation whose parse FAILED is then abandoned (never walked by
+	 * the arena) instead of being freed, so a freed buffer is never met
+	 * twice.
+	 *
+	 * The first (startup) generation is immortal: the running script and
+	 * anything that captured a startup-time string pointer keep using it,
+	 * mirroring the never-free-the-startup-holder rule. */
+	struct yy_str_chunk {
+		struct yy_str_chunk *next;
+		char *base;
+	};
+	struct yy_str_gen {
+		struct yy_str_gen *older;
+		struct yy_str_chunk *chunks;
+		int immortal;
+	};
+	static struct yy_str_gen *yy_cur_gen = NULL;
+
+	static struct yy_str_gen *yy_gen_ensure(void)
+	{
+		if (yy_cur_gen==NULL) {
+			/* the first parse in this process is the startup cfg */
+			yy_cur_gen = pkg_malloc(sizeof(*yy_cur_gen));
+			if (yy_cur_gen==NULL) {
+				LM_CRIT("lex: no pkg memory for the string generation\n");
+				return NULL;
+			}
+			yy_cur_gen->older = NULL;
+			yy_cur_gen->chunks = NULL;
+			yy_cur_gen->immortal = 1;
+		}
+		return yy_cur_gen;
+	}
+
+	/* register a freshly allocated string buffer in the current
+	   generation's arena */
+	static int yy_str_track(char *base)
+	{
+		struct yy_str_chunk *chunk;
+		if (yy_gen_ensure()==NULL)
+			return -1;
+		chunk = pkg_malloc(sizeof(*chunk));
+		if (chunk==NULL) {
+			LM_CRIT("lex: no pkg memory to track a string\n");
+			return -1;
+		}
+		chunk->base = base;
+		chunk->next = yy_cur_gen->chunks;
+		yy_cur_gen->chunks = chunk;
+		return 0;
+	}
+
+	/* hand the built string to the grammar and register it in the arena;
+	   the grammar-owned copy is freed with the generation */
+	static char* yy_str_handoff(void)
+	{
+		char *s = s_buf.s;
+		if (s) {
+			if (yy_str_track(s)!=0)
+				LM_CRIT("lex: string lost by the arena, leaking\n");
+			memset(&s_buf, 0, sizeof(s_buf));
+		}
+		return s;
+	}
+
+	/* OT (#601): open a new (mortal) string generation; called before
+	   re-parsing the cfg for a routes reload, so the strings of the new
+	   script are tracked separately from the installed one's */
+	void cfg_lex_gen_push(void)
+	{
+		struct yy_str_gen *g;
+		if (yy_gen_ensure()==NULL)
+			return;
+		g = pkg_malloc(sizeof(*g));
+		if (g==NULL) {
+			LM_CRIT("lex: no pkg memory for a new string generation\n");
+			return;
+		}
+		g->older = yy_cur_gen;
+		g->chunks = NULL;
+		g->immortal = 0;
+		yy_cur_gen = g;
+	}
+
+	/* free the strings of the generation BEFORE the current one, i.e. the
+	   generation of the route tree that the last switch dropped (immediately
+	   or, when async ops kept it, via reload_free_old_cfg()).  The startup
+	   generation is never freed. */
+	void cfg_lex_gen_free_prev(void)
+	{
+		struct yy_str_gen *g;
+		struct yy_str_chunk *chunk;
+		if (yy_cur_gen==NULL || yy_cur_gen->older==NULL)
+			return;
+		g = yy_cur_gen->older;
+		if (g->immortal)
+			return;
+		yy_cur_gen->older = g->older;
+		while (g->chunks) {
+			chunk = g->chunks;
+			g->chunks = chunk->next;
+			pkg_free(chunk->base);
+			pkg_free(chunk);
+		}
+		pkg_free(g);
+	}
+
+	/* free the CURRENT generation's strings and return to the older one;
+	   used when a parsed route tree is validated and discarded in the same
+	   process without being installed (the MI process's scratch parse) */
+	void cfg_lex_gen_pop(void)
+	{
+		struct yy_str_gen *g = yy_cur_gen;
+		struct yy_str_chunk *chunk;
+		if (g==NULL || g->immortal)
+			return;
+		yy_cur_gen = g->older;
+		while (g->chunks) {
+			chunk = g->chunks;
+			g->chunks = chunk->next;
+			pkg_free(chunk->base);
+			pkg_free(chunk);
+		}
+		pkg_free(g);
+	}
+
+	/* drop the current generation WITHOUT freeing its strings; used when a
+	   reload re-parse fails, because cfg syntax-error paths may already
+	   have individually pkg_free()'d some of its buffers (the list head is
+	   discarded, never walked, so no double free) */
+	void cfg_lex_gen_abandon(void)
+	{
+		if (yy_cur_gen && !yy_cur_gen->immortal)
+			yy_cur_gen = yy_cur_gen->older;
+	}
+
 	int line=1;
 	int np=0;
 	int svar_tlen=0;
@@ -650,8 +801,7 @@ SPACE		[ ]
 				}
 				state=INITIAL_S;
 				BEGIN(INITIAL);
-				yylval.strval=s_buf.s;
-				memset(&s_buf, 0, sizeof(s_buf));
+				yylval.strval=yy_str_handoff();
 				return SCRIPTVAR;
 			} else {
 				np--;
@@ -667,8 +817,7 @@ SPACE		[ ]
 				yyleng--;
 				state=INITIAL_S;
 				BEGIN(INITIAL);
-				yylval.strval=s_buf.s;
-				memset(&s_buf, 0, sizeof(s_buf));
+				yylval.strval=yy_str_handoff();
 				return SCRIPTVAR;
 			} else {
 				yymore();
@@ -685,8 +834,7 @@ SPACE		[ ]
 							}
 							state=INITIAL_S;
 							BEGIN(INITIAL);
-							yylval.strval=s_buf.s;
-							memset(&s_buf, 0, sizeof(s_buf));
+							yylval.strval=yy_str_handoff();
 							return SCRIPTVAR;
 						} else {
 							yymore();
@@ -702,15 +850,13 @@ SPACE		[ ]
 <STRING1>{QUOTES} { count(); state=INITIAL_S; BEGIN(INITIAL);
 						yytext[yyleng-1]=0; yyleng--;
 						addstr(&s_buf, yytext, yyleng);
-						yylval.strval=s_buf.s;
-						memset(&s_buf, 0, sizeof(s_buf));
+						yylval.strval=yy_str_handoff();
 						return STRING;
 					}
 <STRING2>{TICK}  { count(); state=INITIAL_S; BEGIN(INITIAL);
 						yytext[yyleng-1]=0; yyleng--;
 						addstr(&s_buf, yytext, yyleng);
-						yylval.strval=s_buf.s;
-						memset(&s_buf, 0, sizeof(s_buf));
+						yylval.strval=yy_str_handoff();
 						return STRING;
 					}
 <STRING2>.|{EAT_ABLE}	{ addchar(&s_buf, *yytext); }
@@ -748,8 +894,7 @@ SPACE		[ ]
 <INITIAL>{COM_LINE}.*{CR}	{ count(); }
 
 <INITIAL>{ID}			{ count(); addstr(&s_buf, yytext, yyleng);
-									yylval.strval=s_buf.s;
-									memset(&s_buf, 0, sizeof(s_buf));
+									yylval.strval=yy_str_handoff();
 									return ID; }
 <PPTOK_LINE>{SPACE}[^\n]+ { /* grab the line number */
 		st.s = yytext + 1;
@@ -784,11 +929,7 @@ SPACE		[ ]
 										case STRING_S:
 											LM_CRIT("unexpected EOF in"
 														" unclosed string\n");
-											if (s_buf.s){
-												pkg_free(s_buf.s);
-												memset(&s_buf, 0,
-															sizeof(s_buf));
-											}
+											yy_str_handoff();
 											break;
 										case COMMENT_S:
 											LM_CRIT("unexpected EOF in"
@@ -830,9 +971,12 @@ static char* addstr(struct str_buf* dst_b, char* src, int len)
 		size+= STR_BUF_ALLOC_UNIT-size%STR_BUF_ALLOC_UNIT;
 		tmp=pkg_malloc(size);
 		if (tmp==0) goto error;
+		if (yy_str_track(tmp)!=0) {
+			pkg_free(tmp);
+			goto error;
+		}
 		if (dst_b->s){
 			memcpy(tmp, dst_b->s, used);
-			pkg_free(dst_b->s);
 		}
 		dst_b->s=tmp;
 		dst_b->crt=dst_b->s+used;
