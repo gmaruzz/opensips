@@ -50,6 +50,7 @@
 #include "ut.h" /* ZSW() */
 #include "transformations.h"
 #include "xlog.h"
+#include "mod_fix.h" /* free_cmd_gparams (OT #601) */
 
 struct expr* mk_exp(int op, struct expr* left, struct expr* right)
 {
