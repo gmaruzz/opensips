@@ -149,16 +149,19 @@
 		return 0;
 	}
 
-	/* hand the built string to the grammar and register it in the arena;
-	   the grammar-owned copy is freed with the generation */
+	/* hand the built string to the grammar. The buffer was already
+	   registered in the arena by addstr() when it was allocated, so it
+	   must NOT be registered again here: a second registration would put
+	   the same base on the generation's chunk list twice and the
+	   generation's wholesale free would release it twice (abort in
+	   cfg_lex_gen_pop, ot17 double-free). Intermediate growth buffers
+	   (realloc discards) reach the arena only via the addstr()
+	   registration, which is why that one stays. */
 	static char* yy_str_handoff(void)
 	{
 		char *s = s_buf.s;
-		if (s) {
-			if (yy_str_track(s)!=0)
-				LM_CRIT("lex: string lost by the arena, leaking\n");
+		if (s)
 			memset(&s_buf, 0, sizeof(s_buf));
-		}
 		return s;
 	}
 
