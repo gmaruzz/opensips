@@ -100,6 +100,29 @@ static unsigned long long my_parsed_gen = 0;
    it -- the startup holder must never be pkg_free()'d on the reload path */
 static struct os_script_routes *startup_sr = NULL;
 
+/* OT (#601, ot19): every script tree parsed by a reload is built inside a
+   pkg "generation" (see mem/mem.h pkg_gen_*): the holder, the parse and the
+   fixups allocate with that stamp, and the whole tree is later dropped by a
+   single pool sweep, whatever shape the tree has. The startup tree has
+   generation 0 (never swept, immortal as before) */
+static unsigned long sroutes_gen = 0;  /* generation of the running sroutes */
+static unsigned long prev_gen = 0;     /* generation of prev_sr */
+static unsigned long parsed_gen = 0;   /* generation of parsed_sr */
+
+/* drop a script tree: the startup one the stock (shallow) way, a reloaded
+   one by sweeping its generation */
+static void dispose_script(struct os_script_routes *sr, unsigned long gen)
+{
+	if (sr==NULL)
+		return;
+	if (gen==0) {
+		free_route_lists(sr);
+		if (sr!=startup_sr)
+			pkg_free(sr);
+	} else {
+		pkg_gen_sweep(gen);
+	}
+}
 
 
 void reload_swap_old_script(void)
@@ -118,10 +141,9 @@ void reload_swap_current_script(void)
 void reload_free_old_cfg(void)
 {
 	LM_ERR("finally removing the old/prev cfg\n");
-	free_route_lists(prev_sr);
-	if (prev_sr!=startup_sr)
-		pkg_free(prev_sr);
+	dispose_script(prev_sr, prev_gen);
 	prev_sr = NULL;
+	prev_gen = 0;
 	_have_old_script = 0;
 }
 
@@ -244,7 +266,7 @@ static struct os_script_routes *parsed_sr=NULL;
 
 static void routes_reload_per_proc(int sender, void *param)
 {
-	struct os_script_routes *sr_bk;
+	struct os_script_routes *sr_bk = NULL;
 	int seq_no = (int)(long)param;
 	FILE *cfg;
 
@@ -289,9 +311,12 @@ static void routes_reload_per_proc(int sender, void *param)
 	/* get and set a new script routes holder (for new cfg) */
 	if (parsed_sr) {
 		/* probabaly left by mistake from a prev attempt ?? */
-		free_route_lists(parsed_sr);
-		pkg_free(parsed_sr);
+		dispose_script(parsed_sr, parsed_gen);
+		parsed_sr = NULL;
+		parsed_gen = 0;
 	}
+	/* holder, parse and fixups all land in one pkg generation (#601) */
+	parsed_gen = pkg_gen_begin();
 	parsed_sr = new_sroutes_holder( 1 );
 	if (parsed_sr==NULL) {
 		LM_ERR("failed to allocate a new script routes holder\n");
@@ -316,6 +341,7 @@ static void routes_reload_per_proc(int sender, void *param)
 		LM_ERR("fixing routes failed, abording\n");
 		goto error;
 	}
+	pkg_gen_end();
 
 	sroutes = sr_bk;
 
@@ -331,11 +357,14 @@ static void routes_reload_per_proc(int sender, void *param)
 error:
 	srr_ctx->proc_status[process_no] = RELOAD_FAILED;
 	lock_stop_read(srr_ctx->rw_lock);
+	pkg_gen_end();
+	if (sr_bk)
+		sroutes = sr_bk;
 	if (parsed_sr) {
-		free_route_lists(parsed_sr);
-		pkg_free(parsed_sr);
+		dispose_script(parsed_sr, parsed_gen);
 		parsed_sr = NULL;
 	}
+	parsed_gen = 0;
 
 	return;
 }
@@ -350,11 +379,9 @@ static void routes_switch_per_proc(int sender, void *param)
 
 	if (srr_ctx->seq_no!=0 && srr_ctx->seq_no!=seq_no) {
 		LM_INFO("dropping switch cmd due out of sequence reason\n");
-		if (parsed_sr) {
-			free_route_lists(parsed_sr);
-			pkg_free(parsed_sr);
-		}
+		dispose_script(parsed_sr, parsed_gen);
 		parsed_sr = NULL;
+		parsed_gen = 0;
 		return;
 	}
 
@@ -379,20 +406,22 @@ static void routes_switch_per_proc(int sender, void *param)
 		/* we do have onlgoing aync fds */
 		LM_DBG("keeping previous cfg until all ongoing async complete\n");
 		prev_sr = sroutes;
+		prev_gen = sroutes_gen;
 		_have_old_script = 1;
 	} else {
 		/* we can get rid of the script right away*/
 		LM_DBG("no ongoing async, freeing the previous cfg\n");
-		free_route_lists(sroutes);
-		if (sroutes!=startup_sr)
-			pkg_free(sroutes);
+		dispose_script(sroutes, sroutes_gen);
 		prev_sr = NULL;
+		prev_gen = 0;
 		_have_old_script = 0;
 	}
 
 	/* swap the old route set with the new parsed set */
 	sroutes = parsed_sr;
+	sroutes_gen = parsed_gen;
 	parsed_sr = NULL;
+	parsed_gen = 0;
 	my_parsed_gen = srr_ctx->cfg_generation;
 
 	/* update all the ref to script routes */
@@ -446,9 +475,10 @@ done:
  */
 int reload_routing_script(void)
 {
-	struct os_script_routes *sr, *sr_bk;
+	struct os_script_routes *sr=NULL, *sr_bk=NULL;
 	char * curr_wdir=NULL;
 	str cfg_buf={NULL,0};
+	unsigned long gen = 0;
 	int cnt_sleep, ret;
 
 	/* one reload at a time */
@@ -461,21 +491,9 @@ int reload_routing_script(void)
 	srr_ctx->seq_no = srr_ctx->next_seq_no++;
 	lock_release( &srr_ctx->lock );
 
-	sr = new_sroutes_holder( 0 );
-	if (sr==NULL) {
-		LM_ERR("failed to allocate a new script routes holder\n");
-		goto error;
-	}
-
 	LM_INFO("reparsing routes from <%s> file\n",cfg_file);
 
-	sr_bk = sroutes;
-	sroutes = sr;
-
-	/* parse, but only the routes */
-	cfg_parse_only_routes = 1;
-
-	/* switch to the startup working dir, to be sure the file pathname 
+	/* switch to the startup working dir, to be sure the file pathname
 	 * (as given at startup via cli) still match */
 	if (startup_wdir) {
 		if ( (curr_wdir=getcwd(NULL,0))==NULL) {
@@ -514,9 +532,6 @@ int reload_routing_script(void)
 	srr_ctx->reloaded_cfg_buf.len==cfg_buf.len &&
 	memcmp(srr_ctx->reloaded_cfg_buf.s, cfg_buf.s, cfg_buf.len)==0) {
 		LM_INFO("cfg text unchanged since the last reload, nothing to do\n");
-		sroutes = sr_bk;
-		/* sr is still empty (the parse never ran) */
-		pkg_free(sr);
 		free(cfg_buf.s);
 		cfg_buf.s = NULL;
 		cfg_buf.len = 0;
@@ -530,6 +545,17 @@ int reload_routing_script(void)
 		lock_release( &srr_ctx->lock );
 		return 0;
 	}
+
+	/* the scratch tree (holder, parse, fixups) lives in its own pkg
+	   generation and goes away with one sweep (#601) */
+	gen = pkg_gen_begin();
+	sr = new_sroutes_holder( 0 );
+	if (sr==NULL) {
+		LM_ERR("failed to allocate a new script routes holder\n");
+		goto error;
+	}
+	sr_bk = sroutes;
+	sroutes = sr;
 
 	/* parse, but only the routes */
 	cfg_parse_only_routes = 1;
@@ -558,8 +584,9 @@ int reload_routing_script(void)
 		LM_ERR("fixing routes failed, abording\n");
 		goto error;
 	}
+	pkg_gen_end();
 
-	/* trigger module's validation functions to check if the reload of this 
+	/* trigger module's validation functions to check if the reload of this
 	 * new route set is "approved" */
 	if (!modules_validate_reload()) {
 		LM_ERR("routes validation by modules failed, abording reload. "
@@ -569,9 +596,9 @@ int reload_routing_script(void)
 
 	/* we do not need the cfg, so free it and restore previous set of routes */
 	sroutes = sr_bk;
-	free_route_lists(sr);
-	pkg_free(sr);
+	pkg_gen_sweep(gen);
 	sr = NULL;
+	gen = 0;
 
 	LM_DBG("new routes are valid and approved, push it to all procs\n");
 
@@ -640,11 +667,11 @@ error:
 	reset_script_reload_ctx();
 	/* do cleanup */
 	if (curr_wdir) free(curr_wdir);
-	if (sr) {
-		free_route_lists(sr);
-		pkg_free(sr);
+	pkg_gen_end();
+	if (sr)
 		sroutes = sr_bk;
-	}
+	if (gen)
+		pkg_gen_sweep(gen);
 	if (cfg_buf.s)
 		free(cfg_buf.s);
 	return -1;
