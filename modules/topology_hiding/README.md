@@ -261,6 +261,7 @@ Current options for the string flags are :
 
 
 - *U* - Propagate the Username in the Contact header URI
+- *N* - (OT build, not upstream) Hide through the Contact, the no-dialog mode, even when a dialog exists. *topology_hiding_match()* then decodes the Contact first, on any node, and still binds the local dialog if there is one, so profiles, statistics and dialog values keep working on the node that holds it. In-dialog requests need no dialog replication.
 - *D* - Dialog ID (DID) is pushed into Contact username, rather than URI param. This option makes sense only when using topology hiding with dialog support.
 - *a* - Preserve the advertised Contact header advertised to the caller throughout the entire dialog.
 - *A* - Preserve the advertised Contact header advertised to the callee throughout the entire dialog.

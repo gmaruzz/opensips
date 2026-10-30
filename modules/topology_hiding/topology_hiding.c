@@ -312,6 +312,11 @@ int w_topology_hiding(struct sip_msg *req, str *flags_s, struct th_params *param
 					flags |= TOPOH_KEEP_ADV_B;
 					LM_DBG("Will store advertised contact for calllee\n");
 					break;
+				case 'N':
+					/* OT ot23 2026-10-30 (telcocloud opensips_no_dialog_replication) */
+					flags |= TOPOH_NO_DLG;
+					LM_DBG("Will hide through the Contact even with a dialog\n");
+					break;
 				default:
 					LM_DBG("unknown topology_hiding flag : [%c] . Skipping\n",*p);
 			}
@@ -330,8 +335,20 @@ int w_topology_hiding_match(struct sip_msg *req, void *seq_match_mode_val)
 	else
 		mm = (int)(long)seq_match_mode_val;
 
+	/* OT ot23 2026-10-30 (telcocloud opensips_no_dialog_replication): a call hidden with
+	 * flag 'N' carries its routing in the Contact (thinfo param) -- decode that FIRST, on any
+	 * proxy, then still bind the LOCAL dialog if this proxy has one (profiles, stats,
+	 * $dlg_val); the dialog match result does not decide. A request without the param gets
+	 * -1 from topology_hiding_match() with no side effect and goes on as stock, except that
+	 * the decode is not tried a second time. */
+	if (topology_hiding_match(req) > 0) {
+		if (dlg_api.match_dialog)
+			dlg_api.match_dialog(req, mm);
+		return 1;
+	}
+
 	if (!dlg_api.match_dialog || dlg_api.match_dialog(req, mm) < 0)
-		return topology_hiding_match(req);
+		return -1;
 	else
 		/* we went to the dlg module, which triggered us back, all good */
 		return 1;

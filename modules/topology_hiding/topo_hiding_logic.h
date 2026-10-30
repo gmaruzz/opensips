@@ -45,6 +45,13 @@ struct th_params {
 	str ct_callee_user;
 };
 
+/* OT ot23 2026-10-30 (telcocloud references/plans/opensips_no_dialog_replication.md):
+ * topology_hiding() flag 'N' -- hide through the Contact-encoded path (topo_hiding_no_dlg)
+ * even when a dialog exists, so the proxy that holds the address routes the call's in-dialog
+ * requests without dialog replication. Local to this module and never encoded: the TOPOH_*
+ * bits 1<<0..1<<6 live in ../dialog/dlg_hash.h and are stored in the dialog. */
+#define TOPOH_NO_DLG (1<<7)
+
 extern str th_contact_caller_var;
 extern str th_contact_callee_var;
 enum encode_scheme {ENC_BASE64, ENC_BASE32};

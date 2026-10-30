@@ -97,6 +97,12 @@ int topology_hiding(struct sip_msg *req,int extra_flags, struct th_params *param
 	if (t == T_UNDEFINED)
 		t=NULL;
 
+	/* OT ot23 2026-10-30 (telcocloud opensips_no_dialog_replication): flag 'N' takes the
+	 * no-dialog path even when a dialog exists. The dialog (profiles, stats, $dlg_val) stays;
+	 * it just does not carry the hiding. The bit is ours: stripped before it is encoded. */
+	if (extra_flags & TOPOH_NO_DLG)
+		return topo_hiding_no_dlg(req,t,extra_flags & ~TOPOH_NO_DLG,params);
+
 	if (dlg_api.get_dlg) {
 		/* we have dialog module loaded */
 		dlg = dlg_api.get_dlg();
