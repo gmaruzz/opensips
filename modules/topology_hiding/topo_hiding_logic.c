@@ -100,8 +100,19 @@ int topology_hiding(struct sip_msg *req,int extra_flags, struct th_params *param
 	/* OT ot23 2026-10-30 (telcocloud opensips_no_dialog_replication): flag 'N' takes the
 	 * no-dialog path even when a dialog exists. The dialog (profiles, stats, $dlg_val) stays;
 	 * it just does not carry the hiding. The bit is ours: stripped before it is encoded. */
-	if (extra_flags & TOPOH_NO_DLG)
+	if (extra_flags & TOPOH_NO_DLG) {
+		/* OT ot24 2026-11-04 (telcocloud #1432): the no-dialog path never sets
+		 * TOPOH_ONGOING, so without this the dialog module would not save the
+		 * legs' advertised contacts and its own generated in-dialog requests
+		 * would carry the raw peer contact. Flag the dialog so exactly the two
+		 * advertised-contact save sites in dlg_handlers.c still run. */
+		if (dlg_api.get_dlg) {
+			dlg = dlg_api.get_dlg();
+			if (dlg)
+				dlg_api.set_mod_flag(dlg, TOPOH_NO_DLG_SAVE);
+		}
 		return topo_hiding_no_dlg(req,t,extra_flags & ~TOPOH_NO_DLG,params);
+	}
 
 	if (dlg_api.get_dlg) {
 		/* we have dialog module loaded */

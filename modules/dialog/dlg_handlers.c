@@ -1457,8 +1457,9 @@ static void dlg_onreply_out(struct cell* t, int type, struct tmcb_params *ps)
 
 		dlg_update_out_sdp(dlg, callee_idx(dlg), DLG_CALLER_LEG, msg, 0);
 
-		/* save the outgoing contact only if TH */
-		if (dlg->mod_flags & TOPOH_ONGOING) {
+		/* save the outgoing contact only if TH (OT ot24 #1432: or if the
+		 * no-dialog hiding path asked for it via TOPOH_NO_DLG_SAVE) */
+		if (dlg->mod_flags & (TOPOH_ONGOING | TOPOH_NO_DLG_SAVE)) {
 			/* extract the adv contact address */
 			if (!msg->contact&&(parse_headers(msg,HDR_CONTACT_F,0)<0 ||
 			!msg->contact)){
@@ -1600,8 +1601,9 @@ static void dlg_onreq_out(struct cell* t, int type, struct tmcb_params *ps)
 
 	dlg_lock_dlg(dlg);
 
-	/* save the outgoing contact only if TH */
-	if (dlg->mod_flags & TOPOH_ONGOING) {
+	/* save the outgoing contact only if TH (OT ot24 #1432: or if the
+	 * no-dialog hiding path asked for it via TOPOH_NO_DLG_SAVE) */
+	if (dlg->mod_flags & (TOPOH_ONGOING | TOPOH_NO_DLG_SAVE)) {
 		/* extract the contact address */
 		if (!msg->contact&&(parse_headers(msg,HDR_CONTACT_F,0)<0 ||
 		!msg->contact)){

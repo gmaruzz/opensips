@@ -132,6 +132,13 @@ struct dlg_leg {
 #define TOPOH_DID_IN_USER (1 << 4)
 #define TOPOH_KEEP_ADV_A  (1 << 5)
 #define TOPOH_KEEP_ADV_B  (1 << 6)
+/* OT ot24 2026-11-04 (telcocloud #1432): set by topology_hiding's no-dialog
+ * path (flag 'N') so the dialog module still saves each leg's advertised
+ * contact at its two save sites in dlg_handlers.c. Under 'N' TOPOH_ONGOING
+ * is never set; without this the dialog's own generated in-dialog requests
+ * (rtp_relay:update's re-INVITE, dlg_send_sequential) would carry the raw
+ * peer contact instead of the topology-hidden one. */
+#define TOPOH_NO_DLG_SAVE (1 << 7)
 
 struct dlg_cell
 {
