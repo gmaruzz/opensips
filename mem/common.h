@@ -37,6 +37,9 @@ extern int init_done;
 /* stamp written into every fragment a pkg allocator hands out;
  * 0 outside a routes-reload generation (see pkg_gen_*() in mem.h) */
 extern unsigned long pkg_gen_current;
+/* the open generation of a routes reload; pkg_gen_current takes its value only
+ * inside the marked script-parsing functions (pkg_gen_mark()) */
+extern unsigned long pkg_gen_open;
 extern gen_lock_t *hash_locks[TOTAL_F_PARALLEL_POOLS];
 
 #include "meminfo.h"

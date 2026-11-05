@@ -85,9 +85,10 @@ static struct os_script_routes *prev_sr=NULL;
 static struct os_script_routes *swap_bk = NULL;
 
 /* every script tree parsed by a reload is built inside a
-   pkg "generation" (see mem/mem.h pkg_gen_*): the holder, the parse and the
-   fixups allocate with that stamp, and the whole tree is later dropped by a
-   single pool sweep, whatever shape the tree has. The startup tree has
+   pkg "generation" (see mem/mem.h pkg_gen_*): only the script-parsing
+   functions (the holder, yyparse, fix_rls) allocate with that stamp, and the
+   tree is later dropped by a single pool sweep. Module fixups and anything
+   else allocate unmarked. The startup tree has
    generation 0 (never swept, immortal as before) */
 static unsigned long sroutes_gen = 0;  /* generation of the running sroutes */
 static unsigned long prev_gen = 0;     /* generation of prev_sr */
@@ -251,6 +252,8 @@ static void routes_reload_per_proc(int sender, void *param)
 	struct os_script_routes *sr_bk = NULL;
 	int seq_no = (int)(long)param;
 	FILE *cfg;
+	unsigned long g;
+	int ret;
 
 	LM_DBG("reload cmd received in process %d, with seq no %d\n",
 		process_no, seq_no);
@@ -288,7 +291,9 @@ static void routes_reload_per_proc(int sender, void *param)
 	}
 	/* holder, parse and fixups all land in one pkg generation */
 	parsed_gen = pkg_gen_begin();
+	g = pkg_gen_mark();
 	parsed_sr = new_sroutes_holder( 1 );
+	pkg_gen_resume(g);
 	if (parsed_sr==NULL) {
 		LM_ERR("failed to allocate a new script routes holder\n");
 		fclose(cfg);
@@ -300,7 +305,10 @@ static void routes_reload_per_proc(int sender, void *param)
 	/* parse, but only the routes */
 	cfg_parse_only_routes = 1;
 	yyin = cfg;
-	if (yyparse() != 0 || cfg_errors) {
+	g = pkg_gen_mark();
+	ret = yyparse();
+	pkg_gen_resume(g);
+	if (ret != 0 || cfg_errors) {
 		LM_ERR("bad config file (%d errors)\n", cfg_errors);
 		fclose(cfg);
 		goto error;
@@ -308,7 +316,10 @@ static void routes_reload_per_proc(int sender, void *param)
 	fclose(cfg);
 	cfg_parse_only_routes = 0;
 
-	if (fix_rls()<0) {
+	g = pkg_gen_mark();
+	ret = fix_rls();
+	pkg_gen_resume(g);
+	if (ret<0) {
 		LM_ERR("fixing routes failed, abording\n");
 		goto error;
 	}
@@ -437,7 +448,7 @@ int reload_routing_script(void)
 	struct os_script_routes *sr=NULL, *sr_bk=NULL;
 	char * curr_wdir=NULL;
 	str cfg_buf={NULL,0};
-	unsigned long gen = 0;
+	unsigned long gen = 0, g;
 	int cnt_sleep, ret;
 
 	/* one reload at a time */
@@ -453,7 +464,9 @@ int reload_routing_script(void)
 	/* the scratch tree (holder, parse, fixups) lives in its own pkg
 	   generation and goes away with one sweep */
 	gen = pkg_gen_begin();
+	g = pkg_gen_mark();
 	sr = new_sroutes_holder( 0 );
+	pkg_gen_resume(g);
 	if (sr==NULL) {
 		LM_ERR("failed to allocate a new script routes holder\n");
 		goto error;
@@ -501,7 +514,10 @@ int reload_routing_script(void)
 
 	LM_INFO("fixing the loaded routes\n");
 
-	if (fix_rls()<0) {
+	g = pkg_gen_mark();
+	ret = fix_rls();
+	pkg_gen_resume(g);
+	if (ret<0) {
 		LM_ERR("fixing routes failed, abording\n");
 		goto error;
 	}

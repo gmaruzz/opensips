@@ -37,7 +37,9 @@ int set_pkg_mm(const char *mm_name);
 /* per-generation PKG allocations.
  *
  * Every fragment a pkg allocator hands out carries the value pkg_gen_current
- * had at allocation time (a realloc that moves a fragment keeps the stamp of
+ * had at allocation time. A reload opens a generation but only the script
+ * parsing functions mark themselves with it (pkg_gen_mark()); anything else
+ * allocates unstamped (a realloc that moves a fragment keeps the stamp of
  * the fragment it moves). A routes reload opens a generation around the
  * re-parse + fixup of the new script, so the WHOLE tree -- lexer strings,
  * actions, exprs, pv specs, formats, transformations, gparams and module
@@ -58,6 +60,15 @@ void pkg_gen_end(void);
 void pkg_gen_sweep(unsigned long gen);
 int pkg_gen_track(void (*release)(void *), void *arg);
 void pkg_gen_untrack(void *arg);
+
+/* stamp what a script-parsing function allocates with the open generation;
+ * pair with pkg_gen_resume(). No-op outside a reload (no generation open) */
+static inline unsigned long pkg_gen_mark(void)
+{
+	unsigned long g = pkg_gen_current;
+	pkg_gen_current = pkg_gen_open;
+	return g;
+}
 
 static inline unsigned long pkg_gen_suspend(void)
 {

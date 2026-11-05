@@ -33,6 +33,7 @@
 #include "globals.h"
 #include "cfg_pp.h"
 #include "ut.h"
+#include "mem/mem.h"
 
 extern char *finame;
 extern int startline;
@@ -66,6 +67,8 @@ int parse_opensips_cfg(const char *cfg_file, const char *preproc_cmdline,
 {
 	FILE *cfg_stream;
 	str cfg_buf, pp_buf;
+	unsigned long g;
+	int ret;
 
 	/* fill missing arguments with the default values*/
 	if (!cfg_file)
@@ -122,7 +125,10 @@ int parse_opensips_cfg(const char *cfg_file, const char *preproc_cmdline,
 	yyin = cfg_stream;
 	yyrestart(yyin);
 	cfg_errors = 0;
-	if (yyparse() != 0 || cfg_errors) {
+	g = pkg_gen_mark();
+	ret = yyparse();
+	pkg_gen_resume(g);
+	if (ret != 0 || cfg_errors) {
 		LM_ERR("bad config file (%d errors)\n", cfg_errors);
 		fclose(cfg_stream);
 		goto out_free;
