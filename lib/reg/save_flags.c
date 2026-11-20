@@ -124,7 +124,7 @@ int reg_fixup_save_flags(void** param, struct save_flags *default_flags)
 				"discarding trailing <%c>\n", *p);
 		}
 	}
-	/* sip-instance: +sip.instance / reg-id matching (RFC 5626) on or off for
+	/* sip-instance: +sip.instance matching (RFC 5626) on or off for
 	 * this call, whatever the matching mode and the usrloc modparam say */
 	if (flag_vals[4].s) {
 		if (flag_vals[4].len == 1 && flag_vals[4].s[0] == '1')

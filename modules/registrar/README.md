@@ -913,7 +913,7 @@ be used only for the current operation and can be:
 	the value of the given URI param will be used for
 	matching (for example <rinstance>)
   - *'sip-instance=[0|1]'* - turn the RFC 5626
-+sip.instance / reg-id matching on (*1*) or off (*0*) for the current
++sip.instance matching on (*1*) or off (*0*) for the current
 operation only, whatever the *matching-mode* flag and the usrloc
 *sip_instance_matching* parameter say. See the usrloc
 *sip_instance_matching* parameter for how the matching works.

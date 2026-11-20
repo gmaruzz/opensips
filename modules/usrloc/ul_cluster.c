@@ -177,28 +177,6 @@ void bin_push_ctmatch(bin_packet_t *packet, const struct ct_match *match)
 }
 
 /* NOTICE: remember to free @match->match_params when done with it! */
-/* the RFC 5626 reg-id inside a packed (JSON) kv storage, 0 if none */
-static unsigned int packed_kv_reg_id(str *packed)
-{
-	map_t kv;
-	int_str_t *val;
-	unsigned int reg_id = 0;
-
-	if (ZSTRP(packed))
-		return 0;
-
-	kv = store_deserialize(packed);
-	if (!kv)
-		return 0;
-
-	val = kv_get(kv, &ul_regid_key);
-	if (val && !val->is_str)
-		reg_id = (unsigned int)val->i;
-
-	store_destroy(kv);
-	return reg_id;
-}
-
 void bin_pop_ctmatch(bin_packet_t *packet, struct ct_match *match)
 {
 	int np;
@@ -822,12 +800,11 @@ static int receive_ucontact_update(bin_packet_t *packet)
 		rc = get_ucontact(record, &contact_str, &callid, ci.cseq + 1, &cmatch,
 			&contact);
 		if (rc == 1 && ci.instance.s && ci.instance.len) {
-			/* the sender may have matched this contact by +sip.instance and
-			 * reg-id (RFC 5626) and changed its URI: find it the same way and
-			 * take the new URI. No bin format change: both come from the
-			 * contact record (the reg-id from its kv storage) */
+			/* the sender may have matched this contact by +sip.instance
+			 * (RFC 5626) and changed its URI: find it the same way and take
+			 * the new URI. No bin format change: the instance is in the
+			 * contact record */
 			cmatch.instance = ci.instance;
-			cmatch.reg_id = packed_kv_reg_id(ci.packed_kv_storage);
 			cmatch.instance_mode = CT_INSTANCE_ON;
 			rc = get_ucontact(record, &contact_str, &callid, ci.cseq + 1,
 				&cmatch, &contact);

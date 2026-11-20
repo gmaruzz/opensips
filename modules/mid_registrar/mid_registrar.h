@@ -63,7 +63,6 @@ struct ct_mapping {
 	qvalue_t q;
 	str received;
 	str instance;
-	unsigned int reg_id;
 
 	ucontact_t *uc;
 

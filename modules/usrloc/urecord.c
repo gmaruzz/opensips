@@ -58,7 +58,7 @@ extern db_val_t *cid_vals;
 extern int cid_len;
 
 int matching_mode = CT_MATCH_CONTACT_ONLY;
-int sip_instance_matching = 1;
+int sip_instance_matching = 0;
 
 int cseq_delay = 20;
 
@@ -1028,19 +1028,18 @@ next_contact:;
 
 
 /*! \brief
- * Match a stored contact by its +sip.instance and reg-id (RFC 5626).
+ * Match a stored contact by its +sip.instance (RFC 5626).
  * Expired contacts are skipped, so an expired registration with the same
  * instance does not block a fresh insert.
  */
 static inline struct ucontact* contact_instance_match(ucontact_t *contacts,
-                                       str *instance, unsigned int reg_id)
+                                       str *instance)
 {
 	while (contacts) {
 		if (contacts->expires != UL_EXPIRED_TIME &&
 		    contacts->instance.len > 0 &&
 		    contacts->instance.len == instance->len &&
-		    memcmp(contacts->instance.s, instance->s, instance->len) == 0 &&
-		    ucontact_reg_id(contacts) == reg_id)
+		    memcmp(contacts->instance.s, instance->s, instance->len) == 0)
 			return contacts;
 
 		contacts = contacts->next;
@@ -1069,9 +1068,8 @@ int get_ucontact(urecord_t* _r, str* _c, str* _callid, int _cseq,
 	no_callid = 0;
 	*_co = 0;
 
-	/* RFC 5626: an incoming Contact carrying +sip.instance (and reg-id) is
-	 * the same registration as a stored contact with that instance and
-	 * reg-id, even when the Contact URI changed (e.g. a browser tab
+	/* RFC 5626: an incoming Contact carrying +sip.instance is the same
+	 * registration as a stored contact with that instance, even when the Contact URI changed (e.g. a browser tab
 	 * reconnect) -> update the stored contact instead of adding a new one.
 	 * Enabled by the "sip_instance_matching" modparam, unless the caller
 	 * enforced a matching mode; a per-call ON/OFF wins over both */
@@ -1087,8 +1085,7 @@ int get_ucontact(urecord_t* _r, str* _c, str* _callid, int _cseq,
 	       match.mode, use_instance);
 
 	if (use_instance) {
-		ptr = contact_instance_match(_r->contacts, &match.instance,
-		                             match.reg_id);
+		ptr = contact_instance_match(_r->contacts, &match.instance);
 		if (ptr) {
 			LM_DBG("matched contact '%.*s' by +sip.instance\n",
 			       ptr->c.len, ptr->c.s);

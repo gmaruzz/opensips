@@ -189,8 +189,8 @@ this case.
 
 
 On top of these, a Contact carrying the RFC 5626 *+sip.instance*
-parameter (and optionally *reg-id*) is matched to a stored contact with the
-same *+sip.instance* and *reg-id* first, even if its URI or Call-ID changed
+parameter is matched to a stored contact with the
+same *+sip.instance* first, even if its URI or Call-ID changed
 (a client that reconnects from a new address or with a new Call-ID updates
 its registration instead of adding a new one). See
 **[sip_instance_matching](#sip_instance_matching-integer)**.
@@ -881,8 +881,7 @@ modparam("usrloc", "matching_mode", 1)
 
 Enables the RFC 5626 contact matching: a REGISTER Contact carrying a
 *+sip.instance* parameter is the same registration as a stored, not
-expired contact of the same AoR having the same *+sip.instance* and the
-same *reg-id* (a missing *reg-id* only matches a missing one). The stored
+expired contact of the same AoR having the same *+sip.instance*. The stored
 contact is updated, including its Contact URI, instead of adding a new one.
 If no such contact is found, the [matching_mode](#matching_mode-integer)
 algorithm is used as before. Contacts without *+sip.instance* are not
@@ -896,18 +895,17 @@ matching off or on for that call, whatever this parameter and the matching
 mode say.
 
 
-The *reg-id* of a contact is kept in its key-value storage (key *_rid*),
-so it is saved in the DB with the *kv_store* column and replicated in a
-cluster.
+The *reg-id* is not used: two registrations with the same *+sip.instance*
+and different *reg-id* values are the same contact.
 
 
-*Default value is *1 (enabled)*.*
+*Default value is *0 (disabled)*.*
 
 
 ```opensips title="Set sip_instance_matching parameter"
 ...
-# match contacts only by the matching_mode algorithm, as before
-modparam("usrloc", "sip_instance_matching", 0)
+# match a Contact carrying +sip.instance to the stored contact of that instance
+modparam("usrloc", "sip_instance_matching", 1)
 ...
 ```
 
